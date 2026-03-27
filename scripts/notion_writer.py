@@ -10,9 +10,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 
-def get_config():
-    """Load Notion config from environment or .env file."""
-    # Try loading from .env file if env vars not set
+def load_env():
+    """Load .env file into environment variables."""
     env_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
     if os.path.exists(env_file):
         with open(env_file) as f:
@@ -22,13 +21,17 @@ def get_config():
                     key, value = line.split("=", 1)
                     os.environ.setdefault(key.strip(), value.strip())
 
+
+def get_config():
+    """Load Notion config from environment or .env file."""
+    load_env()
+
     token = os.environ.get("NOTION_TOKEN")
     reminders_db = os.environ.get("NOTION_REMINDERS_DB")
     notes_db = os.environ.get("NOTION_NOTES_DB")
 
     if not token:
-        print("Error: NOTION_TOKEN not set. See .env.example for setup.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("NOTION_TOKEN not set. See .env.example for setup.")
 
     return token, reminders_db, notes_db
 
@@ -47,15 +50,13 @@ def notion_api(token, endpoint, payload):
             return json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode()
-        print(f"Notion API error ({e.code}): {body}", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError(f"Notion API error ({e.code}): {body}")
 
 
 def add_reminder(token, db_id, content, deadline, tags=None):
     """Add a reminder to the Notion reminders database."""
     if not db_id:
-        print("Error: NOTION_REMINDERS_DB not set.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("NOTION_REMINDERS_DB not set.")
 
     properties = {
         "Name": {"title": [{"text": {"content": content}}]},
@@ -70,17 +71,18 @@ def add_reminder(token, db_id, content, deadline, tags=None):
 
     payload = {"parent": {"database_id": db_id}, "properties": properties}
     result = notion_api(token, "pages", payload)
+    url = result.get("url", "")
     print(f"Reminder added: {content}")
     if deadline:
         print(f"  Deadline: {deadline}")
-    print(f"  Notion URL: {result.get('url', 'N/A')}")
+    print(f"  Notion URL: {url}")
+    return {"content": content, "deadline": deadline, "tags": tags, "url": url}
 
 
 def add_note(token, db_id, content, category=None, tags=None):
     """Add a note to the Notion notes database."""
     if not db_id:
-        print("Error: NOTION_NOTES_DB not set.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("NOTION_NOTES_DB not set.")
 
     properties = {
         "Name": {"title": [{"text": {"content": content}}]},
@@ -95,10 +97,12 @@ def add_note(token, db_id, content, category=None, tags=None):
 
     payload = {"parent": {"database_id": db_id}, "properties": properties}
     result = notion_api(token, "pages", payload)
+    url = result.get("url", "")
     print(f"Note added: {content}")
     if category:
         print(f"  Category: {category}")
-    print(f"  Notion URL: {result.get('url', 'N/A')}")
+    print(f"  Notion URL: {url}")
+    return {"content": content, "category": category, "tags": tags, "url": url}
 
 
 def main():

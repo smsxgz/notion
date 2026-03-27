@@ -1,54 +1,60 @@
 # AI Message Classifier → Notion
 
-A Claude Code skill that classifies your messages and stores them in Notion databases.
+Classify messages into **reminders** (with deadlines) or **notes** (daily life records), and store them in Notion databases. Two entry points:
 
-## Categories
-
-| Type | Description | Example |
-|------|-------------|---------|
-| **Reminder** | Tasks with deadlines | "周五之前交报告" |
-| **Note** | Life snippets worth recording | "推荐论文 Attention Is All You Need" |
+- **Telegram Bot** — Send messages from your phone, auto-classified via Claude API
+- **Claude Code Skill** — Use `/note` in Claude Code for quick classification
 
 ## Setup
 
-### 1. Create Notion Integration
+### 1. Notion
 
-1. Go to [Notion Integrations](https://www.notion.so/my-integrations)
-2. Create a new integration, copy the token
+1. Go to [Notion Integrations](https://www.notion.so/my-integrations), create an integration, copy the token
+2. Create two databases:
 
-### 2. Create Notion Databases
+   **Reminders**: `Name` (title), `Deadline` (date), `Status` (select: Pending/Done), `Tags` (multi_select)
 
-Create two databases in Notion:
+   **Notes**: `Name` (title), `Date` (date), `Category` (select), `Tags` (multi_select)
 
-**Reminders Database** with properties:
-- `Name` (title)
-- `Deadline` (date)
-- `Status` (select: Pending, Done)
-- `Tags` (multi_select)
+3. Share both databases with your integration ("..." → "Connections")
 
-**Notes Database** with properties:
-- `Name` (title)
-- `Date` (date)
-- `Category` (select)
-- `Tags` (multi_select)
+### 2. Telegram Bot
 
-Then share both databases with your integration (click "..." → "Connections" → add your integration).
+1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → copy the token
+2. (Optional) Message [@userinfobot](https://t.me/userinfobot) to get your user ID for access control
 
-### 3. Configure Environment
+### 3. Claude API
+
+1. Get an API key from [Anthropic Console](https://console.anthropic.com/)
+
+### 4. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env with your token and database IDs
+# Fill in: TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, NOTION_TOKEN, database IDs
+```
+
+### 5. Install & Run
+
+```bash
+pip install -r requirements.txt
+python3 scripts/telegram_bot.py
 ```
 
 ## Usage
 
-In Claude Code:
+### Telegram
+
+Send any message to your bot:
+
+- `周五之前要交机器学习的作业` → 📋 Reminder with deadline
+- `看到一篇论文 Attention Is All You Need` → 📄 Note (论文)
+- `朋友推荐了塞尔达传说` → 🎮 Note (游戏)
+
+The bot replies with the classification result and a Notion link.
+
+### Claude Code
 
 ```
 /note 周五之前要交机器学习的作业
-/note 看到一篇不错的论文 Attention Is All You Need
-/note 朋友推荐了一个游戏叫塞尔达传说
 ```
-
-Claude will automatically classify the message, extract structured data, and write it to the appropriate Notion database.

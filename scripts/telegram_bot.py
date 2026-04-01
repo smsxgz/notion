@@ -2,6 +2,7 @@
 """Telegram bot that classifies messages and writes them to Notion."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -31,64 +32,51 @@ logger = logging.getLogger(__name__)
 # Load .env once at startup
 load_env()
 
-CLASSIFICATION_SCHEMA = {
-    "type": "json_schema",
-    "schema": {
-        "type": "object",
-        "properties": {
-            "type": {
-                "type": "string",
-                "enum": ["reminder", "note"],
-                "description": "reminder: task/event with deadline; note: information worth recording",
-            },
-            "content": {
-                "type": "string",
-                "description": "The core content extracted from the message",
-            },
-            "deadline": {
-                "type": ["string", "null"],
-                "description": "Deadline in YYYY-MM-DD format, null if not a reminder or no deadline mentioned",
-            },
-            "category": {
-                "type": ["string", "null"],
-                "description": "Category for notes: \u8bba\u6587/\u6e38\u620f/\u4e66\u7c4d/\u7535\u5f71/\u97f3\u4e50/\u7f8e\u98df/\u94fe\u63a5/\u60f3\u6cd5/\u5176\u4ed6, null for reminders",
-            },
-            "tags": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Relevant tags extracted from the message",
-            },
-        },
-        "required": ["type", "content", "deadline", "category", "tags"],
-        "additionalProperties": false,
-    },
-}
-
 SYSTEM_PROMPT = f"""\
 You are a message classifier. Classify the user's message into one of two categories:
 
-1. **reminder**: A task or event with a deadline (e.g., "\u5468\u4e94\u4e4b\u524d\u63d0\u4ea4\u62a5\u544a", "\u4e0b\u5468\u4e09\u5f00\u4f1a").
+1. **reminder**: A task or event with a deadline (e.g., "周五之前提交报告", "下周三开会").
    - Extract the task content and deadline.
    - Convert all dates to YYYY-MM-DD format.
 
 2. **note**: A piece of information worth recording (e.g., paper titles, game names, book recommendations).
-   - Extract the content and assign a category: \u8bba\u6587, \u6e38\u620f, \u4e66\u7c4d, \u7535\u5f71, \u97f3\u4e50, \u7f8e\u98df, \u94fe\u63a5, \u60f3\u6cd5, \u5176\u4ed6.
+   - Extract the content and assign a category: 论文, 游戏, 书籍, 电影, 音乐, 美食, 链接, 想法, 其他.
 
-Today's date is {date.today().isoformat()}. Use it to resolve relative dates like "\u4e0b\u5468\u4e09", "\u540e\u5929", "\u6708\u5e95".
-Extract meaningful tags when possible.\
+Today's date is {date.today().isoformat()}. Use it to resolve relative dates like "下周三", "后天", "月底".
+Extract meaningful tags when possible (at most 3 tags). Prioritize location names as tags.
+
+You MUST respond with ONLY a JSON object in the following format, no other text:
+{{"type": "reminder" or "note", "content": "...", "deadline": "YYYY-MM-DD" or null, "category": "..." or null, "tags": ["..."]}}\
 """
 
 
-def classify_message(client: Anthropic, text: str) -> dict:
-    """Call Claude API to classify a message. Runs in a thread (blocking)."""
+def classify_message(client: Anthropic, text: str = None, image_data: bytes = None, image_type: str = "image/jpeg") -> dict:
+    """Call Kimi API to classify a message. Supports text, image, or both."""
+    content = []
+    if image_data:
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": image_type,
+                "data": base64.b64encode(image_data).decode(),
+            },
+        })
+    if text:
+        content.append({"type": "text", "text": text})
+    if not content:
+        raise ValueError("No text or image provided")
+
     response = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="kimi-for-coding",
         max_tokens=256,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": text}],
-        output_config={"format": CLASSIFICATION_SCHEMA},
+        messages=[{"role": "user", "content": content}],
     )
-    return json.loads(response.content[0].text)
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+    return json.loads(raw)
 
 
 def write_to_notion(classification: dict) -> dict:
@@ -113,28 +101,31 @@ def write_to_notion(classification: dict) -> dict:
         )
 
 
+CATEGORY_EMOJI = {
+    "论文": "📄", "游戏": "🎮", "书籍": "📚", "电影": "🎬",
+    "音乐": "🎵", "美食": "🍜", "链接": "🔗", "想法": "💡", "其他": "📝",
+}
+
+
 def format_reply(classification: dict, notion_result: dict) -> str:
     """Format the bot's reply message."""
     if classification["type"] == "reminder":
-        lines = [f"\ud83d\udccb *\u4e8b\u9879\u63d0\u9192*", f"\u5185\u5bb9: {classification['content']}"]
+        lines = ["📋 *事项提醒*", f"内容: {classification['content']}"]
         if classification["deadline"]:
-            lines.append(f"\u622a\u6b62: {classification['deadline']}")
+            lines.append(f"截止: {classification['deadline']}")
     else:
-        emoji = {
-            "\u8bba\u6587": "\ud83d\udcc4", "\u6e38\u620f": "\ud83c\udfae", "\u4e66\u7c4d": "\ud83d\udcda", "\u7535\u5f71": "\ud83c\udfac",
-            "\u97f3\u4e50": "\ud83c\udfb5", "\u7f8e\u98df": "\ud83c\udf5c", "\u94fe\u63a5": "\ud83d\udd17", "\u60f3\u6cd5": "\ud83d\udca1", "\u5176\u4ed6": "\ud83d\udcdd",
-        }.get(classification.get("category", ""), "\ud83d\udcdd")
+        emoji = CATEGORY_EMOJI.get(classification.get("category", ""), "📝")
         lines = [
-            f"{emoji} *{classification.get('category', '\u8bb0\u5f55')}*",
-            f"\u5185\u5bb9: {classification['content']}",
+            f"{emoji} *{classification.get('category', '记录')}*",
+            f"内容: {classification['content']}",
         ]
 
     if classification.get("tags"):
-        lines.append(f"\u6807\u7b7e: {', '.join(classification['tags'])}")
+        lines.append(f"标签: {', '.join(classification['tags'])}")
 
     url = notion_result.get("url", "")
     if url:
-        lines.append(f"[Notion \u94fe\u63a5]({url})")
+        lines.append(f"[Notion 链接]({url})")
 
     return "\n".join(lines)
 
@@ -159,35 +150,42 @@ class NotionBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command."""
         await update.message.reply_text(
-            "\ud83d\udc4b \u53d1\u7ed9\u6211\u4efb\u4f55\u6d88\u606f\uff0c\u6211\u4f1a\u81ea\u52a8\u5206\u7c7b\u5e76\u5b58\u5165 Notion\uff01\n\n"
-            "\u652f\u6301\u4e24\u79cd\u7c7b\u578b\uff1a\n"
-            "\u2022 *\u4e8b\u9879\u63d0\u9192* \u2014 \u5e26 deadline \u7684\u4efb\u52a1\uff08\u5982\uff1a\u5468\u4e94\u4e4b\u524d\u4ea4\u62a5\u544a\uff09\n"
-            "\u2022 *\u65e5\u5e38\u8bb0\u5f55* \u2014 \u8bba\u6587\u3001\u6e38\u620f\u3001\u4e66\u7c4d\u7b49\uff08\u5982\uff1a\u63a8\u8350\u8bba\u6587 xxx\uff09\n\n"
-            "\u76f4\u63a5\u53d1\u6d88\u606f\u5373\u53ef\uff0c\u65e0\u9700\u4efb\u4f55\u547d\u4ee4\u3002",
+            "👋 发给我任何消息，我会自动分类并存入 Notion！\n\n"
+            "支持两种类型：\n"
+            "• *事项提醒* — 带 deadline 的任务（如：周五之前交报告）\n"
+            "• *日常记录* — 论文、游戏、书籍等（如：推荐论文 xxx）\n\n"
+            "直接发消息即可，无需任何命令。",
             parse_mode="Markdown",
         )
 
     async def handle_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle incoming text messages."""
+        """Handle incoming text and photo messages."""
         if not self._is_allowed(update.effective_user.id):
-            await update.message.reply_text("\u26d4 \u65e0\u6743\u9650\u4f7f\u7528\u6b64 Bot\u3002")
+            await update.message.reply_text("无权限使用此 Bot。")
             return
 
-        text = update.message.text
         await update.message.chat.send_action("typing")
+
+        text = update.message.text or update.message.caption
+        image_data = None
+
+        if update.message.photo:
+            photo = update.message.photo[-1]  # largest size
+            file = await photo.get_file()
+            image_data = await file.download_as_bytearray()
 
         try:
             classification = await asyncio.to_thread(
-                classify_message, self.anthropic, text
+                classify_message, self.anthropic, text, image_data
             )
             notion_result = await asyncio.to_thread(write_to_notion, classification)
             reply = format_reply(classification, notion_result)
             await update.message.reply_text(reply, parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)
-            await update.message.reply_text(f"\u274c \u5904\u7406\u5931\u8d25: {e}")
+            await update.message.reply_text(f"处理失败: {e}")
 
 
 def main():
@@ -200,7 +198,9 @@ def main():
     bot = NotionBot()
     app = ApplicationBuilder().token(token).build()
     app.add_handler(CommandHandler("start", bot.start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message))
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND, bot.handle_message
+    ))
 
     logger.info("Bot started. Polling for messages...")
     app.run_polling()
